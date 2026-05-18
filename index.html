@@ -1,0 +1,1199 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>互動週期表 / Interactive Periodic Table</title>
+<meta name="description" content="118 元素互動週期表，內建分子量計算、反應式守恆驗證與元素小測驗。中英雙語。" />
+<script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.5/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  html, body { font-family: 'Noto Sans TC', 'Inter', system-ui, -apple-system, sans-serif; }
+  /* Periodic table grid */
+  .pt-grid {
+    display: grid;
+    grid-template-columns: repeat(18, minmax(56px, 1fr));
+    gap: 4px;
+  }
+  .pt-cell {
+    aspect-ratio: 1 / 1;
+    min-height: 56px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 4px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: transform 0.12s ease, box-shadow 0.12s ease, opacity 0.18s ease;
+    user-select: none;
+    position: relative;
+  }
+  .pt-cell:hover {
+    transform: translateY(-2px) scale(1.04);
+    box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+    z-index: 5;
+  }
+  .pt-cell.dimmed { opacity: 0.18; }
+  .pt-cell.highlighted { outline: 2px solid #1e293b; outline-offset: 1px; }
+  .pt-cell .num { font-size: 9px; line-height: 1; opacity: 0.8; }
+  .pt-cell .sym { font-size: 18px; font-weight: 700; line-height: 1; }
+  .pt-cell .zh { font-size: 9px; line-height: 1; opacity: 0.85; }
+  .pt-cell .mass { font-size: 7px; line-height: 1; opacity: 0.65; }
+  /* Category colors */
+  .cat-alkali       { background: #fda4af; color: #500724; }
+  .cat-alkaline     { background: #fcd34d; color: #422006; }
+  .cat-transition   { background: #fde68a; color: #422006; }
+  .cat-posttrans    { background: #cbd5e1; color: #0f172a; }
+  .cat-metalloid    { background: #bef264; color: #1a2e05; }
+  .cat-nonmetal     { background: #86efac; color: #052e16; }
+  .cat-halogen      { background: #67e8f9; color: #083344; }
+  .cat-noble        { background: #c4b5fd; color: #1e1b4b; }
+  .cat-lanthanide   { background: #f9a8d4; color: #500724; }
+  .cat-actinide     { background: #fbcfe8; color: #500724; }
+  .cat-unknown      { background: #d4d4d8; color: #18181b; }
+
+  /* Lanthanide / Actinide marker rows */
+  .pt-marker { background: repeating-linear-gradient(45deg, #f1f5f9, #f1f5f9 4px, #e2e8f0 4px, #e2e8f0 8px); color: #475569; font-size: 10px; }
+
+  /* Mobile: shrink */
+  @media (max-width: 900px) {
+    .pt-grid { grid-template-columns: repeat(18, minmax(36px, 1fr)); gap: 2px; }
+    .pt-cell { min-height: 36px; padding: 2px; }
+    .pt-cell .num { font-size: 7px; }
+    .pt-cell .sym { font-size: 12px; }
+    .pt-cell .zh, .pt-cell .mass { display: none; }
+  }
+  @media (max-width: 640px) {
+    .pt-wrap { overflow-x: auto; }
+    .pt-grid { min-width: 720px; }
+  }
+
+  /* Tab styling */
+  .tab-btn { transition: all 0.18s ease; }
+  .tab-btn.active { background: #1e293b; color: #fff; }
+  .tab-btn:not(.active):hover { background: #e2e8f0; }
+
+  /* Slide-in detail panel */
+  .detail-panel {
+    transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
+  }
+  .detail-panel.closed { transform: translateX(100%); opacity: 0; pointer-events: none; }
+  @media (max-width: 768px) {
+    .detail-panel.closed { transform: translateY(100%); }
+  }
+
+  /* Code-like input for formulas */
+  .formula-input {
+    font-family: 'JetBrains Mono', 'Menlo', 'Consolas', monospace;
+    letter-spacing: 0.02em;
+  }
+
+  /* Quiz card animations */
+  .quiz-option { transition: all 0.15s ease; }
+  .quiz-option:hover:not(:disabled) { background: #f1f5f9; transform: translateY(-1px); }
+  .quiz-option.correct { background: #86efac !important; color: #052e16; }
+  .quiz-option.wrong { background: #fca5a5 !important; color: #450a0a; }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+<div id="root"></div>
+
+<script type="text/babel" data-presets="env,react">
+const { useState, useMemo, useEffect, useRef, useCallback } = React;
+
+/* ============================================================
+ * 118 元素資料
+ * 欄位：n=原子序, s=符號, zh=中文名(台灣), en=英文名,
+ *       am=原子量, p=週期, g=族, c=分類, b=區塊,
+ *       ec=電子組態, mp=熔點(°C), bp=沸點(°C),
+ *       d=密度(g/cm³, 氣態為 g/L), y=發現/合成年, ph=室溫物態
+ * 分類：alkali / alkaline / transition / posttrans / metalloid /
+ *       nonmetal / halogen / noble / lanthanide / actinide / unknown
+ * 物態：solid / liquid / gas / synthetic
+ * 來源：IUPAC 2021 Standard Atomic Weights、教育部國家教育研究院化學名詞、
+ *       維基百科 (元素標準參數)；最重元素之物理性質為理論預測值。
+ * ============================================================ */
+const ELEMENTS = [
+{n:1,s:"H",zh:"氫",en:"Hydrogen",am:1.008,p:1,g:1,c:"nonmetal",b:"s",ec:"1s¹",mp:-259.16,bp:-252.87,d:0.00009,y:1766,ph:"gas"},
+{n:2,s:"He",zh:"氦",en:"Helium",am:4.0026,p:1,g:18,c:"noble",b:"s",ec:"1s²",mp:-272.2,bp:-268.93,d:0.00018,y:1868,ph:"gas"},
+{n:3,s:"Li",zh:"鋰",en:"Lithium",am:6.94,p:2,g:1,c:"alkali",b:"s",ec:"[He] 2s¹",mp:180.5,bp:1342,d:0.534,y:1817,ph:"solid"},
+{n:4,s:"Be",zh:"鈹",en:"Beryllium",am:9.0122,p:2,g:2,c:"alkaline",b:"s",ec:"[He] 2s²",mp:1287,bp:2470,d:1.85,y:1798,ph:"solid"},
+{n:5,s:"B",zh:"硼",en:"Boron",am:10.81,p:2,g:13,c:"metalloid",b:"p",ec:"[He] 2s² 2p¹",mp:2076,bp:3927,d:2.34,y:1808,ph:"solid"},
+{n:6,s:"C",zh:"碳",en:"Carbon",am:12.011,p:2,g:14,c:"nonmetal",b:"p",ec:"[He] 2s² 2p²",mp:3550,bp:4027,d:2.267,y:-3750,ph:"solid"},
+{n:7,s:"N",zh:"氮",en:"Nitrogen",am:14.007,p:2,g:15,c:"nonmetal",b:"p",ec:"[He] 2s² 2p³",mp:-210,bp:-195.79,d:0.00125,y:1772,ph:"gas"},
+{n:8,s:"O",zh:"氧",en:"Oxygen",am:15.999,p:2,g:16,c:"nonmetal",b:"p",ec:"[He] 2s² 2p⁴",mp:-218.79,bp:-182.95,d:0.00143,y:1774,ph:"gas"},
+{n:9,s:"F",zh:"氟",en:"Fluorine",am:18.998,p:2,g:17,c:"halogen",b:"p",ec:"[He] 2s² 2p⁵",mp:-219.62,bp:-188.12,d:0.0017,y:1886,ph:"gas"},
+{n:10,s:"Ne",zh:"氖",en:"Neon",am:20.180,p:2,g:18,c:"noble",b:"p",ec:"[He] 2s² 2p⁶",mp:-248.59,bp:-246.08,d:0.0009,y:1898,ph:"gas"},
+{n:11,s:"Na",zh:"鈉",en:"Sodium",am:22.990,p:3,g:1,c:"alkali",b:"s",ec:"[Ne] 3s¹",mp:97.79,bp:883,d:0.971,y:1807,ph:"solid"},
+{n:12,s:"Mg",zh:"鎂",en:"Magnesium",am:24.305,p:3,g:2,c:"alkaline",b:"s",ec:"[Ne] 3s²",mp:650,bp:1090,d:1.738,y:1755,ph:"solid"},
+{n:13,s:"Al",zh:"鋁",en:"Aluminium",am:26.982,p:3,g:13,c:"posttrans",b:"p",ec:"[Ne] 3s² 3p¹",mp:660.32,bp:2519,d:2.7,y:1825,ph:"solid"},
+{n:14,s:"Si",zh:"矽",en:"Silicon",am:28.085,p:3,g:14,c:"metalloid",b:"p",ec:"[Ne] 3s² 3p²",mp:1414,bp:3265,d:2.3296,y:1854,ph:"solid"},
+{n:15,s:"P",zh:"磷",en:"Phosphorus",am:30.974,p:3,g:15,c:"nonmetal",b:"p",ec:"[Ne] 3s² 3p³",mp:44.15,bp:280.5,d:1.823,y:1669,ph:"solid"},
+{n:16,s:"S",zh:"硫",en:"Sulfur",am:32.06,p:3,g:16,c:"nonmetal",b:"p",ec:"[Ne] 3s² 3p⁴",mp:115.21,bp:444.61,d:2.067,y:-2000,ph:"solid"},
+{n:17,s:"Cl",zh:"氯",en:"Chlorine",am:35.45,p:3,g:17,c:"halogen",b:"p",ec:"[Ne] 3s² 3p⁵",mp:-101.5,bp:-34.04,d:0.003214,y:1774,ph:"gas"},
+{n:18,s:"Ar",zh:"氬",en:"Argon",am:39.95,p:3,g:18,c:"noble",b:"p",ec:"[Ne] 3s² 3p⁶",mp:-189.34,bp:-185.85,d:0.001784,y:1894,ph:"gas"},
+{n:19,s:"K",zh:"鉀",en:"Potassium",am:39.098,p:4,g:1,c:"alkali",b:"s",ec:"[Ar] 4s¹",mp:63.5,bp:759,d:0.862,y:1807,ph:"solid"},
+{n:20,s:"Ca",zh:"鈣",en:"Calcium",am:40.078,p:4,g:2,c:"alkaline",b:"s",ec:"[Ar] 4s²",mp:842,bp:1484,d:1.55,y:1808,ph:"solid"},
+{n:21,s:"Sc",zh:"鈧",en:"Scandium",am:44.956,p:4,g:3,c:"transition",b:"d",ec:"[Ar] 3d¹ 4s²",mp:1541,bp:2836,d:2.985,y:1879,ph:"solid"},
+{n:22,s:"Ti",zh:"鈦",en:"Titanium",am:47.867,p:4,g:4,c:"transition",b:"d",ec:"[Ar] 3d² 4s²",mp:1668,bp:3287,d:4.506,y:1791,ph:"solid"},
+{n:23,s:"V",zh:"釩",en:"Vanadium",am:50.942,p:4,g:5,c:"transition",b:"d",ec:"[Ar] 3d³ 4s²",mp:1910,bp:3407,d:6.0,y:1801,ph:"solid"},
+{n:24,s:"Cr",zh:"鉻",en:"Chromium",am:51.996,p:4,g:6,c:"transition",b:"d",ec:"[Ar] 3d⁵ 4s¹",mp:1907,bp:2671,d:7.15,y:1797,ph:"solid"},
+{n:25,s:"Mn",zh:"錳",en:"Manganese",am:54.938,p:4,g:7,c:"transition",b:"d",ec:"[Ar] 3d⁵ 4s²",mp:1246,bp:2061,d:7.21,y:1774,ph:"solid"},
+{n:26,s:"Fe",zh:"鐵",en:"Iron",am:55.845,p:4,g:8,c:"transition",b:"d",ec:"[Ar] 3d⁶ 4s²",mp:1538,bp:2861,d:7.874,y:-5000,ph:"solid"},
+{n:27,s:"Co",zh:"鈷",en:"Cobalt",am:58.933,p:4,g:9,c:"transition",b:"d",ec:"[Ar] 3d⁷ 4s²",mp:1495,bp:2927,d:8.9,y:1735,ph:"solid"},
+{n:28,s:"Ni",zh:"鎳",en:"Nickel",am:58.693,p:4,g:10,c:"transition",b:"d",ec:"[Ar] 3d⁸ 4s²",mp:1455,bp:2913,d:8.908,y:1751,ph:"solid"},
+{n:29,s:"Cu",zh:"銅",en:"Copper",am:63.546,p:4,g:11,c:"transition",b:"d",ec:"[Ar] 3d¹⁰ 4s¹",mp:1084.62,bp:2562,d:8.96,y:-9000,ph:"solid"},
+{n:30,s:"Zn",zh:"鋅",en:"Zinc",am:65.38,p:4,g:12,c:"transition",b:"d",ec:"[Ar] 3d¹⁰ 4s²",mp:419.53,bp:907,d:7.14,y:1746,ph:"solid"},
+{n:31,s:"Ga",zh:"鎵",en:"Gallium",am:69.723,p:4,g:13,c:"posttrans",b:"p",ec:"[Ar] 3d¹⁰ 4s² 4p¹",mp:29.76,bp:2204,d:5.91,y:1875,ph:"solid"},
+{n:32,s:"Ge",zh:"鍺",en:"Germanium",am:72.63,p:4,g:14,c:"metalloid",b:"p",ec:"[Ar] 3d¹⁰ 4s² 4p²",mp:938.25,bp:2833,d:5.323,y:1886,ph:"solid"},
+{n:33,s:"As",zh:"砷",en:"Arsenic",am:74.922,p:4,g:15,c:"metalloid",b:"p",ec:"[Ar] 3d¹⁰ 4s² 4p³",mp:817,bp:614,d:5.727,y:1250,ph:"solid"},
+{n:34,s:"Se",zh:"硒",en:"Selenium",am:78.971,p:4,g:16,c:"nonmetal",b:"p",ec:"[Ar] 3d¹⁰ 4s² 4p⁴",mp:221,bp:685,d:4.819,y:1817,ph:"solid"},
+{n:35,s:"Br",zh:"溴",en:"Bromine",am:79.904,p:4,g:17,c:"halogen",b:"p",ec:"[Ar] 3d¹⁰ 4s² 4p⁵",mp:-7.2,bp:58.8,d:3.1028,y:1826,ph:"liquid"},
+{n:36,s:"Kr",zh:"氪",en:"Krypton",am:83.798,p:4,g:18,c:"noble",b:"p",ec:"[Ar] 3d¹⁰ 4s² 4p⁶",mp:-157.36,bp:-153.22,d:0.003749,y:1898,ph:"gas"},
+{n:37,s:"Rb",zh:"銣",en:"Rubidium",am:85.468,p:5,g:1,c:"alkali",b:"s",ec:"[Kr] 5s¹",mp:39.31,bp:688,d:1.532,y:1861,ph:"solid"},
+{n:38,s:"Sr",zh:"鍶",en:"Strontium",am:87.62,p:5,g:2,c:"alkaline",b:"s",ec:"[Kr] 5s²",mp:777,bp:1377,d:2.64,y:1790,ph:"solid"},
+{n:39,s:"Y",zh:"釔",en:"Yttrium",am:88.906,p:5,g:3,c:"transition",b:"d",ec:"[Kr] 4d¹ 5s²",mp:1526,bp:3336,d:4.472,y:1794,ph:"solid"},
+{n:40,s:"Zr",zh:"鋯",en:"Zirconium",am:91.224,p:5,g:4,c:"transition",b:"d",ec:"[Kr] 4d² 5s²",mp:1855,bp:4409,d:6.52,y:1789,ph:"solid"},
+{n:41,s:"Nb",zh:"鈮",en:"Niobium",am:92.906,p:5,g:5,c:"transition",b:"d",ec:"[Kr] 4d⁴ 5s¹",mp:2477,bp:4744,d:8.57,y:1801,ph:"solid"},
+{n:42,s:"Mo",zh:"鉬",en:"Molybdenum",am:95.95,p:5,g:6,c:"transition",b:"d",ec:"[Kr] 4d⁵ 5s¹",mp:2623,bp:4639,d:10.28,y:1781,ph:"solid"},
+{n:43,s:"Tc",zh:"鎝",en:"Technetium",am:98,p:5,g:7,c:"transition",b:"d",ec:"[Kr] 4d⁵ 5s²",mp:2157,bp:4265,d:11,y:1937,ph:"solid"},
+{n:44,s:"Ru",zh:"釕",en:"Ruthenium",am:101.07,p:5,g:8,c:"transition",b:"d",ec:"[Kr] 4d⁷ 5s¹",mp:2334,bp:4150,d:12.45,y:1844,ph:"solid"},
+{n:45,s:"Rh",zh:"銠",en:"Rhodium",am:102.91,p:5,g:9,c:"transition",b:"d",ec:"[Kr] 4d⁸ 5s¹",mp:1964,bp:3695,d:12.41,y:1803,ph:"solid"},
+{n:46,s:"Pd",zh:"鈀",en:"Palladium",am:106.42,p:5,g:10,c:"transition",b:"d",ec:"[Kr] 4d¹⁰",mp:1554.9,bp:2963,d:12.023,y:1803,ph:"solid"},
+{n:47,s:"Ag",zh:"銀",en:"Silver",am:107.87,p:5,g:11,c:"transition",b:"d",ec:"[Kr] 4d¹⁰ 5s¹",mp:961.78,bp:2162,d:10.49,y:-3000,ph:"solid"},
+{n:48,s:"Cd",zh:"鎘",en:"Cadmium",am:112.41,p:5,g:12,c:"transition",b:"d",ec:"[Kr] 4d¹⁰ 5s²",mp:321.07,bp:767,d:8.65,y:1817,ph:"solid"},
+{n:49,s:"In",zh:"銦",en:"Indium",am:114.82,p:5,g:13,c:"posttrans",b:"p",ec:"[Kr] 4d¹⁰ 5s² 5p¹",mp:156.6,bp:2072,d:7.31,y:1863,ph:"solid"},
+{n:50,s:"Sn",zh:"錫",en:"Tin",am:118.71,p:5,g:14,c:"posttrans",b:"p",ec:"[Kr] 4d¹⁰ 5s² 5p²",mp:231.93,bp:2602,d:7.265,y:-3500,ph:"solid"},
+{n:51,s:"Sb",zh:"銻",en:"Antimony",am:121.76,p:5,g:15,c:"metalloid",b:"p",ec:"[Kr] 4d¹⁰ 5s² 5p³",mp:630.63,bp:1587,d:6.685,y:-3000,ph:"solid"},
+{n:52,s:"Te",zh:"碲",en:"Tellurium",am:127.60,p:5,g:16,c:"metalloid",b:"p",ec:"[Kr] 4d¹⁰ 5s² 5p⁴",mp:449.51,bp:988,d:6.232,y:1782,ph:"solid"},
+{n:53,s:"I",zh:"碘",en:"Iodine",am:126.90,p:5,g:17,c:"halogen",b:"p",ec:"[Kr] 4d¹⁰ 5s² 5p⁵",mp:113.7,bp:184.3,d:4.933,y:1811,ph:"solid"},
+{n:54,s:"Xe",zh:"氙",en:"Xenon",am:131.29,p:5,g:18,c:"noble",b:"p",ec:"[Kr] 4d¹⁰ 5s² 5p⁶",mp:-111.75,bp:-108.09,d:0.005887,y:1898,ph:"gas"},
+{n:55,s:"Cs",zh:"銫",en:"Caesium",am:132.91,p:6,g:1,c:"alkali",b:"s",ec:"[Xe] 6s¹",mp:28.44,bp:671,d:1.873,y:1860,ph:"solid"},
+{n:56,s:"Ba",zh:"鋇",en:"Barium",am:137.33,p:6,g:2,c:"alkaline",b:"s",ec:"[Xe] 6s²",mp:727,bp:1845,d:3.51,y:1808,ph:"solid"},
+{n:57,s:"La",zh:"鑭",en:"Lanthanum",am:138.91,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 5d¹ 6s²",mp:920,bp:3464,d:6.162,y:1839,ph:"solid"},
+{n:58,s:"Ce",zh:"鈰",en:"Cerium",am:140.12,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 4f¹ 5d¹ 6s²",mp:795,bp:3443,d:6.77,y:1803,ph:"solid"},
+{n:59,s:"Pr",zh:"鐠",en:"Praseodymium",am:140.91,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 4f³ 6s²",mp:935,bp:3520,d:6.77,y:1885,ph:"solid"},
+{n:60,s:"Nd",zh:"釹",en:"Neodymium",am:144.24,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 4f⁴ 6s²",mp:1024,bp:3074,d:7.01,y:1885,ph:"solid"},
+{n:61,s:"Pm",zh:"鉕",en:"Promethium",am:145,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 4f⁵ 6s²",mp:1042,bp:3000,d:7.26,y:1945,ph:"solid"},
+{n:62,s:"Sm",zh:"釤",en:"Samarium",am:150.36,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 4f⁶ 6s²",mp:1072,bp:1794,d:7.52,y:1879,ph:"solid"},
+{n:63,s:"Eu",zh:"銪",en:"Europium",am:151.96,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 4f⁷ 6s²",mp:822,bp:1529,d:5.243,y:1901,ph:"solid"},
+{n:64,s:"Gd",zh:"釓",en:"Gadolinium",am:157.25,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 4f⁷ 5d¹ 6s²",mp:1313,bp:3273,d:7.895,y:1880,ph:"solid"},
+{n:65,s:"Tb",zh:"鋱",en:"Terbium",am:158.93,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 4f⁹ 6s²",mp:1356,bp:3230,d:8.229,y:1843,ph:"solid"},
+{n:66,s:"Dy",zh:"鏑",en:"Dysprosium",am:162.50,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 4f¹⁰ 6s²",mp:1412,bp:2567,d:8.55,y:1886,ph:"solid"},
+{n:67,s:"Ho",zh:"鈥",en:"Holmium",am:164.93,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 4f¹¹ 6s²",mp:1474,bp:2700,d:8.795,y:1878,ph:"solid"},
+{n:68,s:"Er",zh:"鉺",en:"Erbium",am:167.26,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 4f¹² 6s²",mp:1529,bp:2868,d:9.066,y:1843,ph:"solid"},
+{n:69,s:"Tm",zh:"銩",en:"Thulium",am:168.93,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 4f¹³ 6s²",mp:1545,bp:1950,d:9.321,y:1879,ph:"solid"},
+{n:70,s:"Yb",zh:"鐿",en:"Ytterbium",am:173.05,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 4f¹⁴ 6s²",mp:824,bp:1196,d:6.965,y:1878,ph:"solid"},
+{n:71,s:"Lu",zh:"鎦",en:"Lutetium",am:174.97,p:6,g:3,c:"lanthanide",b:"f",ec:"[Xe] 4f¹⁴ 5d¹ 6s²",mp:1663,bp:3402,d:9.84,y:1907,ph:"solid"},
+{n:72,s:"Hf",zh:"鉿",en:"Hafnium",am:178.49,p:6,g:4,c:"transition",b:"d",ec:"[Xe] 4f¹⁴ 5d² 6s²",mp:2233,bp:4603,d:13.31,y:1923,ph:"solid"},
+{n:73,s:"Ta",zh:"鉭",en:"Tantalum",am:180.95,p:6,g:5,c:"transition",b:"d",ec:"[Xe] 4f¹⁴ 5d³ 6s²",mp:3017,bp:5458,d:16.654,y:1802,ph:"solid"},
+{n:74,s:"W",zh:"鎢",en:"Tungsten",am:183.84,p:6,g:6,c:"transition",b:"d",ec:"[Xe] 4f¹⁴ 5d⁴ 6s²",mp:3422,bp:5555,d:19.25,y:1783,ph:"solid"},
+{n:75,s:"Re",zh:"錸",en:"Rhenium",am:186.21,p:6,g:7,c:"transition",b:"d",ec:"[Xe] 4f¹⁴ 5d⁵ 6s²",mp:3186,bp:5596,d:21.02,y:1925,ph:"solid"},
+{n:76,s:"Os",zh:"鋨",en:"Osmium",am:190.23,p:6,g:8,c:"transition",b:"d",ec:"[Xe] 4f¹⁴ 5d⁶ 6s²",mp:3033,bp:5012,d:22.59,y:1803,ph:"solid"},
+{n:77,s:"Ir",zh:"銥",en:"Iridium",am:192.22,p:6,g:9,c:"transition",b:"d",ec:"[Xe] 4f¹⁴ 5d⁷ 6s²",mp:2466,bp:4428,d:22.56,y:1803,ph:"solid"},
+{n:78,s:"Pt",zh:"鉑",en:"Platinum",am:195.08,p:6,g:10,c:"transition",b:"d",ec:"[Xe] 4f¹⁴ 5d⁹ 6s¹",mp:1768.3,bp:3825,d:21.45,y:1735,ph:"solid"},
+{n:79,s:"Au",zh:"金",en:"Gold",am:196.97,p:6,g:11,c:"transition",b:"d",ec:"[Xe] 4f¹⁴ 5d¹⁰ 6s¹",mp:1064.18,bp:2856,d:19.3,y:-6000,ph:"solid"},
+{n:80,s:"Hg",zh:"汞",en:"Mercury",am:200.59,p:6,g:12,c:"transition",b:"d",ec:"[Xe] 4f¹⁴ 5d¹⁰ 6s²",mp:-38.83,bp:356.73,d:13.534,y:-2000,ph:"liquid"},
+{n:81,s:"Tl",zh:"鉈",en:"Thallium",am:204.38,p:6,g:13,c:"posttrans",b:"p",ec:"[Xe] 4f¹⁴ 5d¹⁰ 6s² 6p¹",mp:304,bp:1473,d:11.85,y:1861,ph:"solid"},
+{n:82,s:"Pb",zh:"鉛",en:"Lead",am:207.2,p:6,g:14,c:"posttrans",b:"p",ec:"[Xe] 4f¹⁴ 5d¹⁰ 6s² 6p²",mp:327.46,bp:1749,d:11.34,y:-7000,ph:"solid"},
+{n:83,s:"Bi",zh:"鉍",en:"Bismuth",am:208.98,p:6,g:15,c:"posttrans",b:"p",ec:"[Xe] 4f¹⁴ 5d¹⁰ 6s² 6p³",mp:271.4,bp:1564,d:9.78,y:1753,ph:"solid"},
+{n:84,s:"Po",zh:"釙",en:"Polonium",am:209,p:6,g:16,c:"posttrans",b:"p",ec:"[Xe] 4f¹⁴ 5d¹⁰ 6s² 6p⁴",mp:254,bp:962,d:9.196,y:1898,ph:"solid"},
+{n:85,s:"At",zh:"砈",en:"Astatine",am:210,p:6,g:17,c:"halogen",b:"p",ec:"[Xe] 4f¹⁴ 5d¹⁰ 6s² 6p⁵",mp:302,bp:337,d:6.35,y:1940,ph:"solid"},
+{n:86,s:"Rn",zh:"氡",en:"Radon",am:222,p:6,g:18,c:"noble",b:"p",ec:"[Xe] 4f¹⁴ 5d¹⁰ 6s² 6p⁶",mp:-71,bp:-61.7,d:0.00973,y:1900,ph:"gas"},
+{n:87,s:"Fr",zh:"鍅",en:"Francium",am:223,p:7,g:1,c:"alkali",b:"s",ec:"[Rn] 7s¹",mp:27,bp:677,d:1.87,y:1939,ph:"solid"},
+{n:88,s:"Ra",zh:"鐳",en:"Radium",am:226,p:7,g:2,c:"alkaline",b:"s",ec:"[Rn] 7s²",mp:700,bp:1737,d:5.5,y:1898,ph:"solid"},
+{n:89,s:"Ac",zh:"錒",en:"Actinium",am:227,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 6d¹ 7s²",mp:1050,bp:3200,d:10.07,y:1899,ph:"solid"},
+{n:90,s:"Th",zh:"釷",en:"Thorium",am:232.04,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 6d² 7s²",mp:1750,bp:4788,d:11.72,y:1828,ph:"solid"},
+{n:91,s:"Pa",zh:"鏷",en:"Protactinium",am:231.04,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 5f² 6d¹ 7s²",mp:1572,bp:4000,d:15.37,y:1913,ph:"solid"},
+{n:92,s:"U",zh:"鈾",en:"Uranium",am:238.03,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 5f³ 6d¹ 7s²",mp:1135,bp:4131,d:19.1,y:1789,ph:"solid"},
+{n:93,s:"Np",zh:"錼",en:"Neptunium",am:237,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 5f⁴ 6d¹ 7s²",mp:644,bp:3902,d:20.45,y:1940,ph:"solid"},
+{n:94,s:"Pu",zh:"鈽",en:"Plutonium",am:244,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 5f⁶ 7s²",mp:640,bp:3228,d:19.85,y:1940,ph:"solid"},
+{n:95,s:"Am",zh:"鋂",en:"Americium",am:243,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 5f⁷ 7s²",mp:1176,bp:2011,d:13.69,y:1944,ph:"solid"},
+{n:96,s:"Cm",zh:"鋦",en:"Curium",am:247,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 5f⁷ 6d¹ 7s²",mp:1345,bp:3110,d:13.51,y:1944,ph:"solid"},
+{n:97,s:"Bk",zh:"鉳",en:"Berkelium",am:247,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 5f⁹ 7s²",mp:986,bp:2627,d:14.79,y:1949,ph:"solid"},
+{n:98,s:"Cf",zh:"鉲",en:"Californium",am:251,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 5f¹⁰ 7s²",mp:900,bp:1470,d:15.1,y:1950,ph:"solid"},
+{n:99,s:"Es",zh:"鑀",en:"Einsteinium",am:252,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 5f¹¹ 7s²",mp:860,bp:996,d:8.84,y:1952,ph:"solid"},
+{n:100,s:"Fm",zh:"鐨",en:"Fermium",am:257,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 5f¹² 7s²",mp:1527,bp:null,d:null,y:1952,ph:"synthetic"},
+{n:101,s:"Md",zh:"鍆",en:"Mendelevium",am:258,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 5f¹³ 7s²",mp:827,bp:null,d:null,y:1955,ph:"synthetic"},
+{n:102,s:"No",zh:"鍩",en:"Nobelium",am:259,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 5f¹⁴ 7s²",mp:827,bp:null,d:null,y:1958,ph:"synthetic"},
+{n:103,s:"Lr",zh:"鐒",en:"Lawrencium",am:266,p:7,g:3,c:"actinide",b:"f",ec:"[Rn] 5f¹⁴ 7s² 7p¹",mp:1627,bp:null,d:null,y:1961,ph:"synthetic"},
+{n:104,s:"Rf",zh:"鑪",en:"Rutherfordium",am:267,p:7,g:4,c:"transition",b:"d",ec:"[Rn] 5f¹⁴ 6d² 7s²",mp:null,bp:null,d:null,y:1964,ph:"synthetic"},
+{n:105,s:"Db",zh:"𨧀",en:"Dubnium",am:268,p:7,g:5,c:"transition",b:"d",ec:"[Rn] 5f¹⁴ 6d³ 7s²",mp:null,bp:null,d:null,y:1968,ph:"synthetic"},
+{n:106,s:"Sg",zh:"𨭎",en:"Seaborgium",am:269,p:7,g:6,c:"transition",b:"d",ec:"[Rn] 5f¹⁴ 6d⁴ 7s²",mp:null,bp:null,d:null,y:1974,ph:"synthetic"},
+{n:107,s:"Bh",zh:"𨨏",en:"Bohrium",am:270,p:7,g:7,c:"transition",b:"d",ec:"[Rn] 5f¹⁴ 6d⁵ 7s²",mp:null,bp:null,d:null,y:1981,ph:"synthetic"},
+{n:108,s:"Hs",zh:"𨭆",en:"Hassium",am:269,p:7,g:8,c:"transition",b:"d",ec:"[Rn] 5f¹⁴ 6d⁶ 7s²",mp:null,bp:null,d:null,y:1984,ph:"synthetic"},
+{n:109,s:"Mt",zh:"䥑",en:"Meitnerium",am:278,p:7,g:9,c:"unknown",b:"d",ec:"[Rn] 5f¹⁴ 6d⁷ 7s²",mp:null,bp:null,d:null,y:1982,ph:"synthetic"},
+{n:110,s:"Ds",zh:"鐽",en:"Darmstadtium",am:281,p:7,g:10,c:"unknown",b:"d",ec:"[Rn] 5f¹⁴ 6d⁸ 7s²",mp:null,bp:null,d:null,y:1994,ph:"synthetic"},
+{n:111,s:"Rg",zh:"錀",en:"Roentgenium",am:282,p:7,g:11,c:"unknown",b:"d",ec:"[Rn] 5f¹⁴ 6d⁹ 7s²",mp:null,bp:null,d:null,y:1994,ph:"synthetic"},
+{n:112,s:"Cn",zh:"鎶",en:"Copernicium",am:285,p:7,g:12,c:"unknown",b:"d",ec:"[Rn] 5f¹⁴ 6d¹⁰ 7s²",mp:null,bp:null,d:null,y:1996,ph:"synthetic"},
+{n:113,s:"Nh",zh:"鉨",en:"Nihonium",am:286,p:7,g:13,c:"unknown",b:"p",ec:"[Rn] 5f¹⁴ 6d¹⁰ 7s² 7p¹",mp:null,bp:null,d:null,y:2003,ph:"synthetic"},
+{n:114,s:"Fl",zh:"鈇",en:"Flerovium",am:289,p:7,g:14,c:"unknown",b:"p",ec:"[Rn] 5f¹⁴ 6d¹⁰ 7s² 7p²",mp:null,bp:null,d:null,y:1999,ph:"synthetic"},
+{n:115,s:"Mc",zh:"鏌",en:"Moscovium",am:289,p:7,g:15,c:"unknown",b:"p",ec:"[Rn] 5f¹⁴ 6d¹⁰ 7s² 7p³",mp:null,bp:null,d:null,y:2003,ph:"synthetic"},
+{n:116,s:"Lv",zh:"鉝",en:"Livermorium",am:293,p:7,g:16,c:"unknown",b:"p",ec:"[Rn] 5f¹⁴ 6d¹⁰ 7s² 7p⁴",mp:null,bp:null,d:null,y:2000,ph:"synthetic"},
+{n:117,s:"Ts",zh:"鿬",en:"Tennessine",am:294,p:7,g:17,c:"unknown",b:"p",ec:"[Rn] 5f¹⁴ 6d¹⁰ 7s² 7p⁵",mp:null,bp:null,d:null,y:2010,ph:"synthetic"},
+{n:118,s:"Og",zh:"鿫",en:"Oganesson",am:294,p:7,g:18,c:"unknown",b:"p",ec:"[Rn] 5f¹⁴ 6d¹⁰ 7s² 7p⁶",mp:null,bp:null,d:null,y:2002,ph:"synthetic"},
+];
+
+/* ============================================================
+ * 元素中英文名查找表（給化學式 parser 用）
+ * ============================================================ */
+const SYMBOL_TO_ELEMENT = ELEMENTS.reduce((acc, el) => { acc[el.s] = el; return acc; }, {});
+const SORTED_SYMBOLS = ELEMENTS.map(e => e.s).sort((a, b) => b.length - a.length); // longest-first 避免 Cl 被吃成 C+l
+
+/* ============================================================
+ * i18n 介面字串
+ * ============================================================ */
+const I18N = {
+  zh: {
+    appTitle: "互動週期表",
+    appSubtitle: "118 元素 · 中英雙語 · 含化學工具",
+    tabTable: "週期表",
+    tabMolar: "分子量",
+    tabReaction: "反應式",
+    tabQuiz: "小測驗",
+    langSwitch: "EN",
+    legendTitle: "圖例（依分類）",
+    catAll: "全部",
+    cat: {
+      alkali: "鹼金屬", alkaline: "鹼土金屬", transition: "過渡金屬",
+      posttrans: "後過渡金屬", metalloid: "類金屬", nonmetal: "非金屬",
+      halogen: "鹵素", noble: "貴氣體", lanthanide: "鑭系", actinide: "錒系",
+      unknown: "性質未知",
+    },
+    block: { all: "全區塊", s: "s 區", p: "p 區", d: "d 區", f: "f 區" },
+    phase: { all: "全相態", solid: "固態", liquid: "液態", gas: "氣態", synthetic: "合成" },
+    filterCat: "分類",
+    filterBlock: "區塊",
+    filterPhase: "室溫物態",
+    clearFilter: "清除篩選",
+    detailNum: "原子序", detailSym: "符號", detailMass: "原子量",
+    detailEc: "電子組態", detailPeriod: "週期", detailGroup: "族",
+    detailMp: "熔點", detailBp: "沸點", detailDensity: "密度",
+    detailYear: "發現年份", detailCat: "分類", detailBlock: "區塊", detailPhase: "室溫物態",
+    detailClose: "關閉",
+    yearBC: "BC",
+    notAvail: "—",
+    lanthanideMarker: "鑭系 (57–71)",
+    actinideMarker: "錒系 (89–103)",
+    // Molar mass
+    molarTitle: "分子量計算器",
+    molarHint: "輸入化學式（支援巢狀括號），按 Enter 計算。",
+    molarPlaceholder: "例如：Ca(OH)2、H2SO4、C6H12O6、Al2(SO4)3",
+    molarCompute: "計算",
+    molarResult: "分子量",
+    molarComposition: "原子組成",
+    molarPercent: "佔比",
+    molarSamples: "範例：",
+    molarErrEmpty: "請輸入化學式",
+    molarErrParse: "解析失敗：",
+    molarErrSymbol: "找不到元素：",
+    molarUnit: "g/mol",
+    // Reaction
+    reactTitle: "反應式守恆驗證",
+    reactSubtitle: "檢查左右兩邊每個原子的合計是否相等。本工具不做自動平衡（不解線性方程組）。",
+    reactLeft: "反應物（左側）",
+    reactRight: "產物（右側）",
+    reactPlaceholderLeft: "例如：CH4 + 2O2",
+    reactPlaceholderRight: "例如：CO2 + 2H2O",
+    reactVerify: "驗證",
+    reactBalanced: "✅ 守恆，左右兩邊原子數相等",
+    reactNotBalanced: "❌ 不守恆，差異如下",
+    reactSamples: "範例：",
+    reactAtom: "原子",
+    reactDiff: "差值",
+    reactColLeft: "左",
+    reactColRight: "右",
+    // Quiz
+    quizTitle: "元素小測驗",
+    quizModeSymbol: "模式：看符號猜元素",
+    quizModeName: "模式：看名稱猜符號",
+    quizModeNumber: "模式：看原子序猜元素",
+    quizStart: "開始",
+    quizNext: "下一題",
+    quizFinish: "完成",
+    quizQuestion: "題",
+    quizScore: "得分",
+    quizCorrect: "答對",
+    quizWrong: "答錯",
+    quizResult: "測驗結果",
+    quizRestart: "再試一次",
+    quizPromptSymbol: "符號是 {sym}，是哪個元素？",
+    quizPromptNameZh: "「{zh}」的化學符號是？",
+    quizPromptNumber: "原子序 {n} 是哪個元素？",
+    quizCorrectAnswer: "正解：",
+    footerData: "資料：IUPAC 標準原子量、教育部國家教育研究院化學名詞、Wikipedia",
+    footerNote: "離線執行 · 完全於瀏覽器運行 · 無外部 API",
+  },
+  en: {
+    appTitle: "Interactive Periodic Table",
+    appSubtitle: "118 elements · Bilingual · with chemistry tools",
+    tabTable: "Table",
+    tabMolar: "Molar Mass",
+    tabReaction: "Reaction",
+    tabQuiz: "Quiz",
+    langSwitch: "中",
+    legendTitle: "Legend (by category)",
+    catAll: "All",
+    cat: {
+      alkali: "Alkali metal", alkaline: "Alkaline earth", transition: "Transition metal",
+      posttrans: "Post-transition", metalloid: "Metalloid", nonmetal: "Nonmetal",
+      halogen: "Halogen", noble: "Noble gas", lanthanide: "Lanthanide", actinide: "Actinide",
+      unknown: "Unknown",
+    },
+    block: { all: "All blocks", s: "s-block", p: "p-block", d: "d-block", f: "f-block" },
+    phase: { all: "All phases", solid: "Solid", liquid: "Liquid", gas: "Gas", synthetic: "Synthetic" },
+    filterCat: "Category",
+    filterBlock: "Block",
+    filterPhase: "Phase at 25°C",
+    clearFilter: "Clear",
+    detailNum: "Atomic #", detailSym: "Symbol", detailMass: "Atomic mass",
+    detailEc: "Electron config", detailPeriod: "Period", detailGroup: "Group",
+    detailMp: "Melting pt", detailBp: "Boiling pt", detailDensity: "Density",
+    detailYear: "Discovered", detailCat: "Category", detailBlock: "Block", detailPhase: "Phase",
+    detailClose: "Close",
+    yearBC: "BC",
+    notAvail: "—",
+    lanthanideMarker: "Lanthanides (57–71)",
+    actinideMarker: "Actinides (89–103)",
+    molarTitle: "Molar Mass Calculator",
+    molarHint: "Enter a formula (nested brackets supported), press Enter.",
+    molarPlaceholder: "e.g. Ca(OH)2, H2SO4, C6H12O6, Al2(SO4)3",
+    molarCompute: "Compute",
+    molarResult: "Molar mass",
+    molarComposition: "Atom composition",
+    molarPercent: "%",
+    molarSamples: "Try:",
+    molarErrEmpty: "Please enter a formula",
+    molarErrParse: "Parse error: ",
+    molarErrSymbol: "Unknown element: ",
+    molarUnit: "g/mol",
+    reactTitle: "Reaction Equation Verifier",
+    reactSubtitle: "Checks if atom counts match on both sides. This tool does NOT auto-balance (no linear-system solver).",
+    reactLeft: "Reactants (left)",
+    reactRight: "Products (right)",
+    reactPlaceholderLeft: "e.g. CH4 + 2O2",
+    reactPlaceholderRight: "e.g. CO2 + 2H2O",
+    reactVerify: "Verify",
+    reactBalanced: "✅ Balanced. Atom counts match.",
+    reactNotBalanced: "❌ Not balanced. Differences:",
+    reactSamples: "Try:",
+    reactAtom: "Atom",
+    reactDiff: "Diff",
+    reactColLeft: "Left",
+    reactColRight: "Right",
+    quizTitle: "Element Quiz",
+    quizModeSymbol: "Mode: symbol → element",
+    quizModeName: "Mode: name → symbol",
+    quizModeNumber: "Mode: atomic # → element",
+    quizStart: "Start",
+    quizNext: "Next",
+    quizFinish: "Finish",
+    quizQuestion: "Q",
+    quizScore: "Score",
+    quizCorrect: "Correct",
+    quizWrong: "Wrong",
+    quizResult: "Result",
+    quizRestart: "Try again",
+    quizPromptSymbol: "What element has symbol {sym}?",
+    quizPromptNameZh: "What is the symbol of {zh}?",
+    quizPromptNumber: "What element has atomic number {n}?",
+    quizCorrectAnswer: "Correct answer: ",
+    footerData: "Data: IUPAC standard atomic weights · NAER chemistry nomenclature · Wikipedia",
+    footerNote: "Runs offline · entirely in your browser · no external API",
+  },
+};
+
+const CAT_ORDER = ["alkali","alkaline","transition","posttrans","metalloid","nonmetal","halogen","noble","lanthanide","actinide","unknown"];
+const CAT_CLASS = {
+  alkali:"cat-alkali", alkaline:"cat-alkaline", transition:"cat-transition",
+  posttrans:"cat-posttrans", metalloid:"cat-metalloid", nonmetal:"cat-nonmetal",
+  halogen:"cat-halogen", noble:"cat-noble", lanthanide:"cat-lanthanide",
+  actinide:"cat-actinide", unknown:"cat-unknown",
+};
+
+/* ============================================================
+ * 化學式 parser（支援巢狀括號）
+ * 回傳 { atoms: { 'H': 2, 'O': 1 }, error: null }
+ * ============================================================ */
+function parseFormula(input) {
+  const f = input.replace(/\s+/g, "");
+  if (!f) return { atoms: null, error: "empty" };
+  let i = 0;
+  function parseSegment(stopChar) {
+    const atoms = {};
+    while (i < f.length && f[i] !== stopChar) {
+      const ch = f[i];
+      if (ch === "(") {
+        i++;
+        const inner = parseSegment(")");
+        if (inner.error) return inner;
+        if (f[i] !== ")") return { atoms: null, error: "missing )" };
+        i++;
+        const mult = readNumber();
+        for (const k in inner.atoms) atoms[k] = (atoms[k] || 0) + inner.atoms[k] * mult;
+      } else if (/[A-Z]/.test(ch)) {
+        // try 2-letter symbol first
+        let sym = ch;
+        if (i + 1 < f.length && /[a-z]/.test(f[i+1])) sym += f[i+1];
+        // longest-match against known symbols (handles 3-letter symbols Uut etc., but our table tops at 2)
+        if (!SYMBOL_TO_ELEMENT[sym] && sym.length === 2) {
+          // fallback: maybe just 1-letter
+          if (SYMBOL_TO_ELEMENT[ch]) {
+            sym = ch;
+            i += 1;
+          } else {
+            return { atoms: null, error: "symbol:" + sym };
+          }
+        } else if (!SYMBOL_TO_ELEMENT[sym]) {
+          return { atoms: null, error: "symbol:" + sym };
+        } else {
+          i += sym.length;
+        }
+        const mult = readNumber();
+        atoms[sym] = (atoms[sym] || 0) + mult;
+      } else {
+        return { atoms: null, error: "char:" + ch };
+      }
+    }
+    return { atoms, error: null };
+  }
+  function readNumber() {
+    let s = "";
+    while (i < f.length && /[0-9]/.test(f[i])) { s += f[i]; i++; }
+    return s ? parseInt(s, 10) : 1;
+  }
+  const result = parseSegment(null);
+  if (result.error) return result;
+  return { atoms: result.atoms, error: null };
+}
+
+/* ============================================================
+ * 反應式單側解析：「2H2 + O2」 → { H: 4, O: 2 }
+ * ============================================================ */
+function parseSide(input) {
+  const parts = input.split("+").map(s => s.trim()).filter(Boolean);
+  if (!parts.length) return { atoms: null, error: "empty" };
+  const total = {};
+  for (const part of parts) {
+    // 可選前置係數，如 "2H2O"、"3 Fe2O3"
+    const m = part.match(/^([0-9]*)\s*(.+)$/);
+    const coef = m[1] ? parseInt(m[1], 10) : 1;
+    const formula = m[2];
+    const r = parseFormula(formula);
+    if (r.error) return { atoms: null, error: r.error + " in " + formula };
+    for (const k in r.atoms) total[k] = (total[k] || 0) + r.atoms[k] * coef;
+  }
+  return { atoms: total, error: null };
+}
+
+/* ============================================================
+ * 計算分子量
+ * ============================================================ */
+function molarMass(atoms) {
+  let total = 0;
+  const breakdown = [];
+  for (const sym in atoms) {
+    const el = SYMBOL_TO_ELEMENT[sym];
+    if (!el) return { total: 0, breakdown: [], error: sym };
+    const contrib = el.am * atoms[sym];
+    total += contrib;
+    breakdown.push({ sym, count: atoms[sym], am: el.am, contrib });
+  }
+  // sort by contribution desc
+  breakdown.sort((a, b) => b.contrib - a.contrib);
+  return { total, breakdown, error: null };
+}
+
+/* ============================================================
+ * 工具函數：年份顯示（負數 → BC）
+ * ============================================================ */
+function fmtYear(y, t) {
+  if (y == null) return t.notAvail;
+  if (y < 0) return Math.abs(y) + " " + t.yearBC;
+  return String(y);
+}
+function fmtNum(v, suffix) {
+  if (v == null) return "—";
+  return (typeof v === "number" ? v.toLocaleString("en-US", { maximumFractionDigits: 4 }) : v) + (suffix || "");
+}
+
+/* ============================================================
+ * 主應用元件
+ * ============================================================ */
+function App() {
+  const [lang, setLang] = useState("zh");
+  const [tab, setTab] = useState("table");
+  const t = I18N[lang];
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      {/* Header */}
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-30">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
+          <div>
+            <h1 className="text-lg sm:text-xl font-bold tracking-tight text-slate-900">
+              {t.appTitle}
+            </h1>
+            <p className="text-xs text-slate-500 mt-0.5 hidden sm:block">{t.appSubtitle}</p>
+          </div>
+          <button
+            onClick={() => setLang(lang === "zh" ? "en" : "zh")}
+            className="px-3 py-1.5 text-sm border border-slate-300 rounded-md hover:bg-slate-100 font-medium"
+            aria-label="Switch language"
+          >
+            {t.langSwitch}
+          </button>
+        </div>
+        {/* Tabs */}
+        <nav className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex gap-1 -mb-px overflow-x-auto">
+          {[
+            { id: "table", label: t.tabTable },
+            { id: "molar", label: t.tabMolar },
+            { id: "reaction", label: t.tabReaction },
+            { id: "quiz", label: t.tabQuiz },
+          ].map(x => (
+            <button
+              key={x.id}
+              onClick={() => setTab(x.id)}
+              className={`tab-btn px-4 py-2 text-sm font-medium rounded-t-md whitespace-nowrap ${tab === x.id ? "active" : "text-slate-600"}`}
+            >
+              {x.label}
+            </button>
+          ))}
+        </nav>
+      </header>
+
+      {/* Main */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {tab === "table" && <PeriodicTableView t={t} lang={lang} />}
+        {tab === "molar" && <MolarMassView t={t} lang={lang} />}
+        {tab === "reaction" && <ReactionView t={t} lang={lang} />}
+        {tab === "quiz" && <QuizView t={t} lang={lang} />}
+      </main>
+
+      {/* Footer */}
+      <footer className="border-t border-slate-200 bg-white">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 text-xs text-slate-500">
+          <p>{t.footerData}</p>
+          <p className="mt-1">{t.footerNote}</p>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+/* ============================================================
+ * 週期表主視圖
+ * ============================================================ */
+function PeriodicTableView({ t, lang }) {
+  const [selected, setSelected] = useState(null);
+  const [hoverEl, setHoverEl] = useState(null);
+  const [filterCat, setFilterCat] = useState("all");
+  const [filterBlock, setFilterBlock] = useState("all");
+  const [filterPhase, setFilterPhase] = useState("all");
+
+  // Build a sparse 2D grid: rows 1-7 = periods 1-7; rows 9-10 = lanthanide / actinide
+  // Special handling for La (57) → put marker "*" at (6, 3); Ac (89) → "**" at (7, 3)
+  const grid = useMemo(() => {
+    const g = Array.from({ length: 10 }, () => Array(18).fill(null));
+    for (const el of ELEMENTS) {
+      let row, col;
+      if (el.n >= 57 && el.n <= 71) { row = 8; col = el.n - 57 + 2; }       // lanthanides row 9 (index 8), col 3..17
+      else if (el.n >= 89 && el.n <= 103) { row = 9; col = el.n - 89 + 2; } // actinides row 10 (index 9), col 3..17
+      else { row = el.p - 1; col = el.g - 1; }
+      g[row][col] = el;
+    }
+    return g;
+  }, []);
+
+  const isDimmed = useCallback((el) => {
+    if (!el) return false;
+    if (filterCat !== "all" && el.c !== filterCat) return true;
+    if (filterBlock !== "all" && el.b !== filterBlock) return true;
+    if (filterPhase !== "all" && el.ph !== filterPhase) return true;
+    return false;
+  }, [filterCat, filterBlock, filterPhase]);
+
+  const isHighlighted = useCallback((el) => {
+    if (!el || !hoverEl) return false;
+    if (el === hoverEl) return false; // self handled by hover style
+    return el.p === hoverEl.p || el.g === hoverEl.g;
+  }, [hoverEl]);
+
+  const clearFilter = filterCat !== "all" || filterBlock !== "all" || filterPhase !== "all";
+
+  return (
+    <div className="space-y-4">
+      {/* Filters */}
+      <div className="flex flex-wrap items-center gap-3 text-sm">
+        <FilterSelect label={t.filterCat} value={filterCat} onChange={setFilterCat} options={[
+          ["all", t.catAll],
+          ...CAT_ORDER.map(k => [k, t.cat[k]])
+        ]} />
+        <FilterSelect label={t.filterBlock} value={filterBlock} onChange={setFilterBlock} options={[
+          ["all", t.block.all], ["s", t.block.s], ["p", t.block.p], ["d", t.block.d], ["f", t.block.f],
+        ]} />
+        <FilterSelect label={t.filterPhase} value={filterPhase} onChange={setFilterPhase} options={[
+          ["all", t.phase.all], ["solid", t.phase.solid], ["liquid", t.phase.liquid], ["gas", t.phase.gas], ["synthetic", t.phase.synthetic],
+        ]} />
+        {clearFilter && (
+          <button onClick={() => { setFilterCat("all"); setFilterBlock("all"); setFilterPhase("all"); }}
+            className="text-slate-600 hover:text-slate-900 underline">
+            {t.clearFilter}
+          </button>
+        )}
+      </div>
+
+      {/* Table */}
+      <div className="pt-wrap">
+        <div className="pt-grid">
+          {grid.flat().map((el, idx) => {
+            const row = Math.floor(idx / 18);
+            const col = idx % 18;
+            // Period 6 column 3 → lanthanide marker
+            if (row === 5 && col === 2) {
+              return (
+                <div key={idx} className="pt-cell pt-marker flex flex-col items-center justify-center"
+                     title={t.lanthanideMarker}>
+                  <span style={{fontSize:'14px'}}>*</span>
+                  <span style={{fontSize:'8px'}}>57–71</span>
+                </div>
+              );
+            }
+            if (row === 6 && col === 2) {
+              return (
+                <div key={idx} className="pt-cell pt-marker flex flex-col items-center justify-center"
+                     title={t.actinideMarker}>
+                  <span style={{fontSize:'14px'}}>**</span>
+                  <span style={{fontSize:'8px'}}>89–103</span>
+                </div>
+              );
+            }
+            // Spacer between row 7 and lanthanide row → render empty in row 7 col 0
+            if (row === 7) return <div key={idx} />;
+            if (!el) return <div key={idx} />;
+            const dim = isDimmed(el);
+            const hi = isHighlighted(el);
+            return (
+              <div
+                key={idx}
+                className={`pt-cell ${CAT_CLASS[el.c]} ${dim ? "dimmed" : ""} ${hi ? "highlighted" : ""}`}
+                onClick={() => setSelected(el)}
+                onMouseEnter={() => setHoverEl(el)}
+                onMouseLeave={() => setHoverEl(null)}
+                title={`${el.n} ${el.s} ${lang === 'zh' ? el.zh : el.en}`}
+              >
+                <div className="flex justify-between items-start">
+                  <span className="num">{el.n}</span>
+                  <span className="num" style={{fontSize:'8px', opacity:0.7}}>{el.b}</span>
+                </div>
+                <div className="sym">{el.s}</div>
+                <div>
+                  <div className="zh">{lang === 'zh' ? el.zh : el.en.length > 7 ? el.en.slice(0,6)+'…' : el.en}</div>
+                  <div className="mass">{el.am}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Legend */}
+      <div className="border-t border-slate-200 pt-4">
+        <p className="text-xs font-semibold text-slate-700 mb-2">{t.legendTitle}</p>
+        <div className="flex flex-wrap gap-2 text-xs">
+          {CAT_ORDER.map(k => (
+            <span key={k} className={`px-2 py-1 rounded-md ${CAT_CLASS[k]}`}>
+              {t.cat[k]}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* Detail panel */}
+      <div className={`fixed top-0 right-0 h-full w-full md:w-96 bg-white shadow-2xl z-50 detail-panel ${selected ? "" : "closed"} overflow-y-auto`}>
+        {selected && <ElementDetail el={selected} t={t} lang={lang} onClose={() => setSelected(null)} />}
+      </div>
+      {selected && (
+        <div className="fixed inset-0 bg-black/30 z-40 md:hidden" onClick={() => setSelected(null)} />
+      )}
+    </div>
+  );
+}
+
+function FilterSelect({ label, value, onChange, options }) {
+  return (
+    <label className="flex items-center gap-2">
+      <span className="text-slate-600 text-xs uppercase tracking-wide">{label}</span>
+      <select value={value} onChange={e => onChange(e.target.value)}
+              className="border border-slate-300 rounded-md px-2 py-1 bg-white">
+        {options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function ElementDetail({ el, t, lang, onClose }) {
+  const name = lang === "zh" ? el.zh : el.en;
+  const altName = lang === "zh" ? el.en : el.zh;
+  return (
+    <div className="p-6">
+      <div className="flex items-start justify-between mb-4">
+        <div>
+          <div className="text-xs uppercase tracking-wider text-slate-500">{t.detailNum} {el.n}</div>
+          <div className={`inline-flex flex-col items-center justify-center w-24 h-24 mt-2 rounded-lg ${CAT_CLASS[el.c]}`}>
+            <span className="text-xs">{el.n}</span>
+            <span className="text-3xl font-bold leading-none">{el.s}</span>
+            <span className="text-xs mt-1">{el.am}</span>
+          </div>
+        </div>
+        <button onClick={onClose} className="text-slate-400 hover:text-slate-700 text-2xl leading-none" aria-label={t.detailClose}>✕</button>
+      </div>
+      <h2 className="text-2xl font-bold text-slate-900">{name}</h2>
+      <p className="text-sm text-slate-500 mb-4">{altName}</p>
+
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+        <Row label={t.detailMass} value={`${el.am} ${t.molarUnit}`} />
+        <Row label={t.detailCat} value={t.cat[el.c]} />
+        <Row label={t.detailPeriod} value={el.p} />
+        <Row label={t.detailGroup} value={el.g} />
+        <Row label={t.detailBlock} value={el.b} />
+        <Row label={t.detailPhase} value={t.phase[el.ph]} />
+        <Row label={t.detailMp} value={fmtNum(el.mp, " °C")} />
+        <Row label={t.detailBp} value={fmtNum(el.bp, " °C")} />
+        <Row label={t.detailDensity} value={fmtNum(el.d, el.ph === "gas" ? " g/L" : " g/cm³")} />
+        <Row label={t.detailYear} value={fmtYear(el.y, t)} />
+      </dl>
+
+      <div className="mt-4 pt-4 border-t border-slate-200">
+        <div className="text-xs uppercase tracking-wider text-slate-500 mb-1">{t.detailEc}</div>
+        <div className="font-mono text-sm bg-slate-50 px-3 py-2 rounded">{el.ec}</div>
+      </div>
+    </div>
+  );
+}
+
+function Row({ label, value }) {
+  return (
+    <>
+      <dt className="text-xs uppercase tracking-wider text-slate-500">{label}</dt>
+      <dd className="text-slate-900 font-medium">{value}</dd>
+    </>
+  );
+}
+
+/* ============================================================
+ * 分子量計算器
+ * ============================================================ */
+const MOLAR_SAMPLES = ["H2O", "NaCl", "C6H12O6", "Ca(OH)2", "Al2(SO4)3", "CH3COOH", "Fe2O3", "K3PO4"];
+
+function MolarMassView({ t, lang }) {
+  const [input, setInput] = useState("H2O");
+  const [result, setResult] = useState(() => computeMolar("H2O", t));
+
+  function computeMolar(formula, tStr) {
+    if (!formula.trim()) return { error: tStr.molarErrEmpty };
+    const r = parseFormula(formula);
+    if (r.error) {
+      if (r.error.startsWith("symbol:")) return { error: tStr.molarErrSymbol + r.error.slice(7) };
+      return { error: tStr.molarErrParse + r.error };
+    }
+    const m = molarMass(r.atoms);
+    if (m.error) return { error: tStr.molarErrSymbol + m.error };
+    return { total: m.total, breakdown: m.breakdown, formula };
+  }
+
+  function onSubmit(e) {
+    e.preventDefault();
+    setResult(computeMolar(input, t));
+  }
+
+  return (
+    <div className="max-w-3xl space-y-4">
+      <div>
+        <h2 className="text-xl font-bold text-slate-900">{t.molarTitle}</h2>
+        <p className="text-sm text-slate-500 mt-1">{t.molarHint}</p>
+      </div>
+
+      <form onSubmit={onSubmit} className="flex gap-2">
+        <input
+          type="text"
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          placeholder={t.molarPlaceholder}
+          className="formula-input flex-1 border border-slate-300 rounded-md px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-slate-400"
+          autoFocus
+        />
+        <button type="submit" className="bg-slate-900 text-white px-4 py-2 rounded-md hover:bg-slate-700 font-medium">
+          {t.molarCompute}
+        </button>
+      </form>
+
+      <div className="text-xs text-slate-500 flex flex-wrap gap-2 items-center">
+        <span>{t.molarSamples}</span>
+        {MOLAR_SAMPLES.map(s => (
+          <button key={s} onClick={() => { setInput(s); setResult(computeMolar(s, t)); }}
+                  className="formula-input px-2 py-0.5 bg-slate-100 hover:bg-slate-200 rounded">
+            {s}
+          </button>
+        ))}
+      </div>
+
+      {result && result.error && (
+        <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-md text-sm">
+          {result.error}
+        </div>
+      )}
+
+      {result && !result.error && (
+        <div className="bg-white border border-slate-200 rounded-lg p-5">
+          <div className="flex items-baseline gap-3">
+            <span className="text-sm text-slate-500">{t.molarResult}</span>
+            <span className="text-3xl font-bold text-slate-900">{result.total.toFixed(3)}</span>
+            <span className="text-base text-slate-500">{t.molarUnit}</span>
+          </div>
+          <div className="formula-input text-sm text-slate-600 mt-1">{result.formula}</div>
+
+          <div className="mt-5">
+            <div className="text-xs uppercase tracking-wider text-slate-500 mb-2">{t.molarComposition}</div>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-xs text-slate-500 uppercase border-b border-slate-200">
+                  <th className="text-left py-2 font-medium">{t.detailSym}</th>
+                  <th className="text-left py-2 font-medium">{lang === 'zh' ? '元素' : 'Element'}</th>
+                  <th className="text-right py-2 font-medium">{lang === 'zh' ? '原子數' : 'Count'}</th>
+                  <th className="text-right py-2 font-medium">{t.detailMass}</th>
+                  <th className="text-right py-2 font-medium">{lang === 'zh' ? '貢獻' : 'Contrib.'}</th>
+                  <th className="text-right py-2 font-medium">{t.molarPercent}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {result.breakdown.map(b => {
+                  const el = SYMBOL_TO_ELEMENT[b.sym];
+                  const pct = (b.contrib / result.total) * 100;
+                  return (
+                    <tr key={b.sym} className="border-b border-slate-100">
+                      <td className="py-2"><span className={`inline-block px-2 py-0.5 rounded ${CAT_CLASS[el.c]} font-bold`}>{b.sym}</span></td>
+                      <td className="py-2">{lang === 'zh' ? el.zh : el.en}</td>
+                      <td className="py-2 text-right tabular-nums">×{b.count}</td>
+                      <td className="py-2 text-right tabular-nums">{b.am}</td>
+                      <td className="py-2 text-right tabular-nums">{b.contrib.toFixed(3)}</td>
+                      <td className="py-2 text-right tabular-nums">{pct.toFixed(2)}%</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+ * 反應式守恆驗證
+ * ============================================================ */
+const REACT_SAMPLES = [
+  ["CH4 + 2O2", "CO2 + 2H2O"],
+  ["2H2 + O2", "2H2O"],
+  ["N2 + 3H2", "2NH3"],
+  ["2Al + 3CuSO4", "Al2(SO4)3 + 3Cu"],
+  ["H2 + O2", "H2O"], // 故意不平衡
+];
+
+function ReactionView({ t, lang }) {
+  const [left, setLeft] = useState("CH4 + 2O2");
+  const [right, setRight] = useState("CO2 + 2H2O");
+  const [result, setResult] = useState(null);
+
+  // 自動驗證：每次 left / right 變動就重算（避免 setState 非同步 closure 陷阱）
+  useEffect(() => {
+    const L = parseSide(left);
+    const R = parseSide(right);
+    if (L.error || R.error) {
+      setResult({ error: (L.error || R.error) });
+      return;
+    }
+    const atoms = new Set([...Object.keys(L.atoms), ...Object.keys(R.atoms)]);
+    const rows = [];
+    let balanced = true;
+    for (const a of atoms) {
+      const lc = L.atoms[a] || 0;
+      const rc = R.atoms[a] || 0;
+      const diff = lc - rc;
+      if (diff !== 0) balanced = false;
+      rows.push({ atom: a, left: lc, right: rc, diff });
+    }
+    rows.sort((a, b) => a.atom.localeCompare(b.atom));
+    setResult({ balanced, rows });
+  }, [left, right]);
+
+  function onSubmit(e) { e.preventDefault(); /* useEffect 已自動運算，這裡只防 form 跳頁 */ }
+
+  return (
+    <div className="max-w-3xl space-y-4">
+      <div>
+        <h2 className="text-xl font-bold text-slate-900">{t.reactTitle}</h2>
+        <p className="text-sm text-slate-500 mt-1">{t.reactSubtitle}</p>
+      </div>
+
+      <form onSubmit={onSubmit} className="space-y-3">
+        <div>
+          <label className="text-xs uppercase tracking-wider text-slate-500 block mb-1">{t.reactLeft}</label>
+          <input type="text" value={left} onChange={e => setLeft(e.target.value)}
+                 placeholder={t.reactPlaceholderLeft}
+                 className="formula-input w-full border border-slate-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400" />
+        </div>
+        <div className="text-center text-2xl text-slate-400">→</div>
+        <div>
+          <label className="text-xs uppercase tracking-wider text-slate-500 block mb-1">{t.reactRight}</label>
+          <input type="text" value={right} onChange={e => setRight(e.target.value)}
+                 placeholder={t.reactPlaceholderRight}
+                 className="formula-input w-full border border-slate-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400" />
+        </div>
+        <button type="submit" className="bg-slate-900 text-white px-4 py-2 rounded-md hover:bg-slate-700 font-medium">
+          {t.reactVerify}
+        </button>
+      </form>
+
+      <div className="text-xs text-slate-500 flex flex-wrap gap-2 items-center">
+        <span>{t.reactSamples}</span>
+        {REACT_SAMPLES.map(([l, r], i) => (
+          <button key={i} onClick={() => { setLeft(l); setRight(r); }}
+                  className="formula-input px-2 py-0.5 bg-slate-100 hover:bg-slate-200 rounded">
+            {l} → {r}
+          </button>
+        ))}
+      </div>
+
+      {result && result.error && (
+        <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-md text-sm">
+          {result.error}
+        </div>
+      )}
+
+      {result && !result.error && (
+        <div className={`border rounded-lg p-5 ${result.balanced ? "bg-emerald-50 border-emerald-200" : "bg-amber-50 border-amber-200"}`}>
+          <div className={`font-semibold mb-3 ${result.balanced ? "text-emerald-800" : "text-amber-800"}`}>
+            {result.balanced ? t.reactBalanced : t.reactNotBalanced}
+          </div>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-slate-500 uppercase border-b border-slate-300">
+                <th className="text-left py-2 font-medium">{t.reactAtom}</th>
+                <th className="text-right py-2 font-medium">{t.reactColLeft}</th>
+                <th className="text-right py-2 font-medium">{t.reactColRight}</th>
+                <th className="text-right py-2 font-medium">{t.reactDiff}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.rows.map(r => {
+                const el = SYMBOL_TO_ELEMENT[r.atom];
+                return (
+                  <tr key={r.atom} className="border-b border-slate-200/70">
+                    <td className="py-2">
+                      <span className={`inline-block px-2 py-0.5 rounded ${el ? CAT_CLASS[el.c] : 'cat-unknown'} font-bold`}>{r.atom}</span>
+                      {el && <span className="ml-2 text-slate-600">{lang === 'zh' ? el.zh : el.en}</span>}
+                    </td>
+                    <td className="py-2 text-right tabular-nums">{r.left}</td>
+                    <td className="py-2 text-right tabular-nums">{r.right}</td>
+                    <td className={`py-2 text-right tabular-nums font-semibold ${r.diff === 0 ? "text-emerald-700" : "text-amber-700"}`}>
+                      {r.diff > 0 ? `+${r.diff}` : r.diff}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+ * 元素小測驗
+ * ============================================================ */
+const QUIZ_TOTAL = 10;
+const QUIZ_MODES = ["symbol", "name", "number"];
+
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function buildQuestion(mode, lang) {
+  // Pick from the first 86 elements (commonly known); avoid synthetic-only
+  const pool = ELEMENTS.filter(e => e.n <= 86);
+  const correct = pool[Math.floor(Math.random() * pool.length)];
+  const distractorPool = pool.filter(e => e.n !== correct.n);
+  const distractors = shuffle(distractorPool).slice(0, 3);
+  const options = shuffle([correct, ...distractors]);
+  let prompt = "", correctText = "";
+  if (mode === "symbol") {
+    prompt = "promptSymbol"; // build text in render
+    correctText = lang === "zh" ? correct.zh : correct.en;
+  } else if (mode === "name") {
+    prompt = "promptName";
+    correctText = correct.s;
+  } else {
+    prompt = "promptNumber";
+    correctText = lang === "zh" ? correct.zh : correct.en;
+  }
+  return { mode, correct, options, promptKey: prompt };
+}
+
+function QuizView({ t, lang }) {
+  const [mode, setMode] = useState("symbol");
+  const [phase, setPhase] = useState("idle"); // idle | playing | done
+  const [questions, setQuestions] = useState([]);
+  const [idx, setIdx] = useState(0);
+  const [score, setScore] = useState(0);
+  const [picked, setPicked] = useState(null);
+  const [answers, setAnswers] = useState([]);
+
+  function start() {
+    const qs = Array.from({ length: QUIZ_TOTAL }, () => buildQuestion(mode, lang));
+    setQuestions(qs);
+    setIdx(0);
+    setScore(0);
+    setPicked(null);
+    setAnswers([]);
+    setPhase("playing");
+  }
+
+  function pick(option) {
+    if (picked) return;
+    const q = questions[idx];
+    const isCorrect = option.n === q.correct.n;
+    setPicked(option.n);
+    setAnswers(prev => [...prev, { q, picked: option, correct: isCorrect }]);
+    if (isCorrect) setScore(s => s + 1);
+  }
+
+  function next() {
+    if (idx + 1 >= QUIZ_TOTAL) {
+      setPhase("done");
+    } else {
+      setIdx(idx + 1);
+      setPicked(null);
+    }
+  }
+
+  // idle screen
+  if (phase === "idle") {
+    return (
+      <div className="max-w-xl space-y-4">
+        <h2 className="text-xl font-bold text-slate-900">{t.quizTitle}</h2>
+        <div className="space-y-2">
+          {QUIZ_MODES.map(m => (
+            <label key={m} className="flex items-center gap-3 px-4 py-3 border border-slate-200 rounded-lg hover:bg-slate-50 cursor-pointer">
+              <input type="radio" name="mode" value={m} checked={mode === m} onChange={() => setMode(m)} />
+              <span>{m === "symbol" ? t.quizModeSymbol : m === "name" ? t.quizModeName : t.quizModeNumber}</span>
+            </label>
+          ))}
+        </div>
+        <button onClick={start} className="bg-slate-900 text-white px-6 py-2.5 rounded-md hover:bg-slate-700 font-medium">
+          {t.quizStart}
+        </button>
+      </div>
+    );
+  }
+
+  // done screen
+  if (phase === "done") {
+    return (
+      <div className="max-w-2xl space-y-4">
+        <h2 className="text-xl font-bold text-slate-900">{t.quizResult}</h2>
+        <div className="bg-white border border-slate-200 rounded-lg p-6 text-center">
+          <div className="text-5xl font-bold text-slate-900">{score} <span className="text-2xl text-slate-400">/ {QUIZ_TOTAL}</span></div>
+          <div className="text-sm text-slate-500 mt-2">
+            {t.quizCorrect}: {score} · {t.quizWrong}: {QUIZ_TOTAL - score}
+          </div>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-lg divide-y divide-slate-200">
+          {answers.map((a, i) => (
+            <div key={i} className="p-3 flex items-center gap-3">
+              <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${a.correct ? "bg-emerald-200 text-emerald-900" : "bg-red-200 text-red-900"}`}>{a.correct ? "✓" : "✗"}</span>
+              <div className="flex-1 text-sm">
+                <span className="text-slate-500">Q{i+1}：</span>
+                <span className="font-mono">{a.q.correct.s}</span>
+                <span className="text-slate-500"> · {lang === 'zh' ? a.q.correct.zh : a.q.correct.en}</span>
+              </div>
+              {!a.correct && (
+                <span className="text-xs text-red-600">→ {a.picked.s} / {lang === 'zh' ? a.picked.zh : a.picked.en}</span>
+              )}
+            </div>
+          ))}
+        </div>
+        <button onClick={() => setPhase("idle")} className="bg-slate-900 text-white px-6 py-2.5 rounded-md hover:bg-slate-700 font-medium">
+          {t.quizRestart}
+        </button>
+      </div>
+    );
+  }
+
+  // playing screen
+  const q = questions[idx];
+  const promptText = q.promptKey === "promptSymbol" ? t.quizPromptSymbol.replace("{sym}", q.correct.s)
+                   : q.promptKey === "promptName"    ? t.quizPromptNameZh.replace("{zh}", lang === 'zh' ? q.correct.zh : q.correct.en)
+                   : t.quizPromptNumber.replace("{n}", q.correct.n);
+
+  return (
+    <div className="max-w-xl space-y-4">
+      <div className="flex justify-between items-baseline">
+        <span className="text-sm text-slate-500">{t.quizQuestion} {idx + 1} / {QUIZ_TOTAL}</span>
+        <span className="text-sm text-slate-500">{t.quizScore}: <span className="font-bold text-slate-900">{score}</span></span>
+      </div>
+      <div className="bg-white border border-slate-200 rounded-lg p-6">
+        <p className="text-lg font-medium text-slate-900 mb-5">{promptText}</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {q.options.map(opt => {
+            const isCorrect = opt.n === q.correct.n;
+            const isPicked = picked === opt.n;
+            const showResult = picked != null;
+            const cls = !showResult ? "" : isCorrect ? "correct" : (isPicked ? "wrong" : "");
+            const label = q.promptKey === "promptName" ? opt.s : (lang === "zh" ? opt.zh : opt.en);
+            return (
+              <button key={opt.n}
+                      disabled={showResult}
+                      onClick={() => pick(opt)}
+                      className={`quiz-option border border-slate-200 rounded-md px-4 py-3 text-left ${cls}`}>
+                <span className="font-mono text-xs text-slate-500 mr-2">{opt.n}</span>
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        {picked != null && (
+          <div className="mt-4 pt-4 border-t border-slate-200 text-sm">
+            <span className="text-slate-500">{t.quizCorrectAnswer}</span>
+            <span className="font-mono font-bold">{q.correct.s}</span>
+            <span> · {lang === 'zh' ? q.correct.zh : q.correct.en}</span>
+            <button onClick={next} className="float-right bg-slate-900 text-white px-4 py-1.5 rounded-md hover:bg-slate-700 text-sm font-medium">
+              {idx + 1 >= QUIZ_TOTAL ? t.quizFinish : t.quizNext}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+ * 啟動
+ * ============================================================ */
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
